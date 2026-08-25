@@ -9,7 +9,7 @@ stage supports resume; every output column is documented below.
 
 ---
 
-**DOI:** [10.5281/zenodo.22099252](https://doi.org/10.5281/zenodo.22099252)
+**DOI:** [10.5281/zenodo.22100725](https://doi.org/10.5281/zenodo.22100725)
 
 ## Install
 
