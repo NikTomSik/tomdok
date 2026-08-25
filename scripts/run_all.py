@@ -5,12 +5,15 @@ same orchestrator works for any target. Heavy stages are auto-skipped when
 their outputs look complete (unless --force). Stops on first error;
 --keep-going continues onward.
 
-Stage order: 00..07, then 09 (figures), then 08 (supplementary bundle + ZIP)
-- 08 runs LAST so the ZIP it produces already contains the figures.
+Stage order: 00..07, then 09 (figures), then 08 (supplementary bundle + ZIP);
+08 runs LAST so the ZIP it produces already contains the figures.
 
 Every run is mirrored to logs/run_all_<target>.log (the logs/ folder is
-created automatically); this file later becomes S8_run_all_log.txt in the
-supplementary bundle (08_supplementary.py).
+created automatically); this file later becomes S9_run_all_log.txt in the
+supplementary bundle (08_supplementary.py). Before each run the previous log
+is auto-archived as logs/run_all_<target>_<YYYYmmdd_HHMMSS>.log, so a short
+resume run can never destroy a full --force log; 08 picks the largest (most
+complete) log for S9.
 
 Usage:
  python scripts/run_all.py                      # auto-skip ready (7gqu)
@@ -29,9 +32,20 @@ BASE = Path(__file__).resolve().parents[1]
 COMPLETION = 0.97   # resume markers tolerate up to ~3% permanent failures
 
 class Logger:
-    """Mirrors every byte to the terminal AND to the log file (live)."""
+    """Mirrors every byte to the terminal AND to the log file (live).
+
+    On start, the previous non-empty log is archived with a timestamp suffix
+    (rotation), so history is never lost."""
     def __init__(self, path):
         self.term = sys.stdout
+        if path.exists() and path.stat().st_size > 0:
+            ts = datetime.fromtimestamp(path.stat().st_mtime).strftime('%Y%m%d_%H%M%S')
+            arch = path.with_name(f'{path.stem}_{ts}{path.suffix}')
+            n = 1
+            while arch.exists():   # never overwrite an existing archive
+                arch = path.with_name(f'{path.stem}_{ts}_{n}{path.suffix}')
+                n += 1
+            path.rename(arch)
         self.f = open(path, 'wb')
     def say(self, msg=''):
         b = (msg + '\n').encode('utf-8')
@@ -93,7 +107,8 @@ def stages(t, a):
          (refine / 'consensus.csv').exists()),
         ('05 redock_validation',
          [sys.executable, 'scripts/05_redock_validation.py', '--target', t],
-         (BASE / 'validation' / 'redock' / t / 'redock_report.txt').exists()),
+         ((BASE / 'validation' / 'redock' / t / 'redock_report.txt').exists() and
+          'verdict=PASS' in (BASE / 'validation' / 'redock' / t / 'redock_report.txt').read_text())),
         ('06 admet',
          [sys.executable, 'scripts/06_admet.py', '--all',
           '--input', str(refine / 'consensus.csv')],
