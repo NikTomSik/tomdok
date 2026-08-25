@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+title: Universal Drug Repurposing Pipeline
+message: If you use this software or its screening results, please cite it as below.
+type: software
+authors:
+  - family-names: Nikosin
+    given-names: Tomas
+year: 2026
+license: MIT
+doi: 10.5281/zenodo.---

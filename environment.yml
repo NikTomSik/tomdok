@@ -1,0 +1,23 @@
+name: tomdok
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - python=3.11
+  - rdkit
+  - numpy
+  - pandas
+  - openbabel
+  - pdbfixer
+  - openmm
+  - gnina
+  - autodock-vina
+  - pymol-open-source
+  - matplotlib
+  - pillow
+  - pip
+  - pip:
+    - meeko
+    - dimorphite-dl
+    - plip

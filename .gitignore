@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+
+# Logs and temp files
+logs/
+*.bak
+*.tmp
+*.swp
+
+# Heavy source database (download separately, see README)
+data/chembl_37.db
+
+# Prepared ligand library (reproducible via 02_prepare_ligands.py)
+pdbqt/
+sdf3d/
+
+# Docking poses and per-engine caches (reproducible via 03/04)
+results/
+
+# Validation: keep only the text report, ignore heavy artifacts
+validation/
+supplementary/
+*Zone.Identifier
