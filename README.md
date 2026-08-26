@@ -9,7 +9,7 @@ stage supports resume; every output column is documented below.
 
 ---
 
-**DOI:** [10.5281/zenodo.22100725](https://doi.org/10.5281/zenodo.22100725)
+**DOI:** [10.5281/zenodo.--](https://doi.org/10.5281/zenodo.--)
 
 ## Install
 
@@ -27,9 +27,10 @@ worked around by falling back to the system `curl` or Python `urllib`.
 ### Manual alternative
 
     conda create -n screen python=3.11 && conda activate screen
-    conda install -c conda-forge rdkit numpy openbabel pdbfixer openmm gnina
+    conda install -c conda-forge rdkit numpy pandas openbabel pdbfixer openmm gnina \
+                                 pymol-open-source matplotlib pillow
     conda install -c bioconda autodock-vina
-    python -m pip install meeko dimorphite-dl
+    python -m pip install meeko dimorphite-dl plip
     # LeDock: download ledock/lepro from lephar.com and place in PATH (optional)
 
 ---
@@ -50,6 +51,11 @@ worked around by falling back to the system `curl` or Python `urllib`.
 - `--cpu N`                threads per GNINA worker (03)
 - `--workers N`            CPU pool for Vina/LeDock (04)
 
+Each run is mirrored to `logs/run_all_<target>.log`; the previous log is
+auto-archived with a timestamp suffix, so a short resume run never
+overwrites a full `--force` log. The bundle (stage 08) picks the largest
+(most complete) log for `S9_run_all_log.txt`.
+
 Manual step-by-step:
 
     python scripts/00_prepare_target.py --pdb-id <id>
@@ -57,11 +63,11 @@ Manual step-by-step:
     python scripts/02_prepare_ligands.py
     python scripts/03_screen_gnina.py <id> --gpus 0,1
     python scripts/04_refine_consensus.py <id>
-    python scripts/05_redock_validation.py --target <id>
+    python scripts/05_redock_validation.py --target <id>            # --basis best|top
     python scripts/06_admet.py --all
     python scripts/07_final_candidates.py --target <id>
-    python scripts/09_make_figures.py --target <id>          # 3D + 2D figures
-    python scripts/08_supplementary.py --target <id> --zip   # bundle (includes figures)
+    python scripts/09_make_figures.py --target <id>                 # 3D + 2D figures
+    python scripts/08_supplementary.py --target <id> --zip          # bundle (includes figures + poses)
 
 ---
 
@@ -75,14 +81,15 @@ Manual step-by-step:
     03_screen_gnina.py      primary GNINA screen (multi-GPU, exh=4)
     04_refine_consensus.py  three-engine consensus (GNINA exh=32, Vina exh=32,
                             LeDock) with filter aff <= -9 and cnn >= 0.7
-    05_redock_validation.py self-docking RMSD of the crystallised inhibitor
+    05_redock_validation.py self-docking RMSD (best-pose or top-pose criterion)
     06_admet.py             rule-based ADMET + ChEMBL-derived hERG/withdrawn
     07_final_candidates.py  final CLEAN / FLAGGED prioritisation
     09_make_figures.py      publication figures for ALL final candidates
                             (PyMOL 3D per ligand + overlays + redock;
-                             RDKit 2D structures + PLIP interaction summary)
+                             RDKit 2D structures + PLIP interaction summary;
+                             .pse sessions for overlays)
     08_supplementary.py     build Zenodo/journal supplementary bundle
-                            (S0-S9 files, figures folder, manifest, ZIP)
+                            (S0-S9 files, figures, poses, manifest, ZIP)
 
 ---
 
@@ -90,13 +97,13 @@ Manual step-by-step:
 
     scripts/
       setup_env.sh            install / verify environment
-      run_all.py              orchestrator 00 to 09 (resume-aware, auto-logs)
+      run_all.py              orchestrator 00 to 09 (resume-aware, log rotation)
       00_prepare_target.py    protein + receptors + box + ref-ligand
       01_build_library.py     ChEMBL library (--min-phase) + hERG liability
       02_prepare_ligands.py   PDBQT library
       03_screen_gnina.py      primary GNINA screen (multi-GPU)
       04_refine_consensus.py  3-engine consensus
-      05_redock_validation.py RMSD validation
+      05_redock_validation.py RMSD validation (--basis best|top)
       06_admet.py             ADMET profiling
       07_final_candidates.py  final CLEAN / FLAGGED prioritisation
       09_make_figures.py      3D + 2D figures (PyMOL + PLIP)
@@ -105,7 +112,7 @@ Manual step-by-step:
                               ref_ligand.*
     data/library/library.tsv  curated library (SMILES + properties + phase + herg)
     pdbqt/                    prepared ligands
-    logs/                     run_all execution logs (auto-created)
+    logs/                     run_all execution logs (auto-created, rotated)
     supplementary/<target>/   generated supplementary bundle
       S0_manifest.txt         manifest: target, funnel, parameters, RMSD, figures
       S1_library.tsv          full repurposing library
@@ -116,12 +123,15 @@ Manual step-by-step:
       S6_final_candidates.csv final CLEAN / FLAGGED prioritisation
       S7_redock_validation.txt redocking RMSD report
       S8_parameters.json      machine-readable parameters
-      S9_run_all_log.txt      run_all execution log
+      S9_run_all_log.txt      most complete run_all execution log
       figures/                publication figures (stage 09)
-        overlay/Fig_overlay_{CLEAN,FLAGGED}.png
+        overlay/Fig_overlay_{CLEAN,FLAGGED}.{png,pse}
         redock/Fig_redock.png
         per_ligand/{CLEAN,FLAGGED}/<name>.png
         interactions_2d/{CLEAN,FLAGGED}/<name>.png
+      poses/                  universal 3D data for any viewer
+        receptor.pdb          cleaned protein
+        <chembl_id>.sdf       per-ligand docked pose
     results/<target>/
       all_docking_results.csv primary screen
       refine/consensus.csv    consensus
@@ -165,9 +175,15 @@ Manual step-by-step:
 
 ### 05 redock_validation
 
-RMSD of the top pose and of the best pose, relative to the crystallised
-inhibitor. PASS when RMSD < 2.0 A. Report is written to
-`validation/redock/<target>/redock_report.txt`.
+Two RMSD metrics against the crystallised inhibitor:
+
+- **top-pose RMSD** — RMSD of the best-scored pose (tests *scoring* power)
+- **best-pose RMSD** — lowest RMSD among all poses (tests *sampling* power)
+
+Verdict is PASS when `best-pose RMSD < 2.0 A` (community standard for
+protocol validation). Use `--basis top` for the stricter scoring criterion.
+Report is written to `validation/redock/<target>/redock_report.txt` and
+contains both RMSD values plus the rank of the native-like pose.
 
 ### 06 admet -> admet_all.csv
 
@@ -197,8 +213,8 @@ inhibitor. PASS when RMSD < 2.0 A. Report is written to
 
 | File | Meaning |
 |---|---|
-| `overlay/Fig_overlay_CLEAN.png` | all CLEAN candidates overlaid in the binding site |
-| `overlay/Fig_overlay_FLAGGED.png` | all FLAGGED candidates overlaid |
+| `overlay/Fig_overlay_CLEAN.{png,pse}` | all CLEAN candidates overlaid; `.pse` is an editable PyMOL session |
+| `overlay/Fig_overlay_FLAGGED.{png,pse}` | all FLAGGED candidates overlaid |
 | `redock/Fig_redock.png` | crystal ligand (green) vs top redock pose (magenta) |
 | `per_ligand/{CLEAN,FLAGGED}/<name>.png` | per-ligand 3D: site sticks + polar contacts |
 | `interactions_2d/{CLEAN,FLAGGED}/<name>.png` | 2D structure (RDKit) + scores + PLIP interactions |
@@ -206,6 +222,16 @@ inhibitor. PASS when RMSD < 2.0 A. Report is written to
 CLEAN figures are rendered with green ligand sticks, FLAGGED with orange;
 the redock figure uses green for the crystallographic pose and magenta for
 the top-ranked self-docked pose.
+
+### 08 supplementary -> supplementary/<target>/poses/
+
+| File | Meaning |
+|---|---|
+| `receptor.pdb` | cleaned protein structure (stage 00) |
+| `<chembl_id>.sdf` | docked pose of each final candidate |
+
+The `poses/` folder contains universal 3D coordinates that open in any
+viewer (PyMOL, ChimeraX, VMD, Mol*, iCn3D) — independent of PyMOL sessions.
 
 ---
 
@@ -215,6 +241,13 @@ the top-ranked self-docked pose.
 Vina affinities agree to Delta-Delta-G < 0.1 kcal/mol for the top hits. Both
 engines use physics-based scoring but differ in implementation, so agreement
 across them is strong evidence the signal is real.
+
+**LeDock as orthogonal check.** LeDock scores are on a systematically softer
+scale than GNINA/Vina and are therefore used as a rank-level orthogonal
+check rather than a threshold voter: for the consensus hits, LeDock scores
+consistently fall in the upper part of their score range, independently
+supporting the ranking. The binary consensus (`n_engines_le9 <= -9`) is
+driven by GNINA and Vina.
 
 **CLEAN vs FLAGGED.** A CLEAN hit has no safety flags and is ready for wet-lab
 follow-up. A FLAGGED hit is a strong binder but carries one or more of
@@ -228,10 +261,26 @@ additional justification.
 
 **Known biases.** ADMET is rule-based for phys-chem / HIA / BBB / PAINS, and
 data-driven for hERG (ChEMBL activities vs KCNH2) and withdrawn (ChEMBL
-flags). LeDock scores are on a softer scale than GNINA/Vina (do not compare
-absolute values across engines). Cationic amphiphilic drugs (antihistamines,
-antipsychotics) are enriched in the hits and may be frequent-hitters;
-consider counter-screens for non-specific binding.
+flags). Cationic amphiphilic drugs (antihistamines, antipsychotics) are
+enriched in the hits and may be frequent-hitters; consider counter-screens
+for non-specific binding.
+
+---
+
+## Example: 7GQU (WRN helicase)
+
+| Funnel step | Count |
+|---|---|
+| Library (ChEMBL 37, phase >= 3, deduplicated) | 3,369 |
+| Prepared PDBQT (stage 02, QC attrition −43) | 3,326 |
+| Docked successfully (stage 03) | 3,326 |
+| Primary hits (aff <= −9.0, CNN >= 0.7) | 71 |
+| Consensus hits (GNINA32 + Vina + LeDock) | 64 |
+| CLEAN / FLAGGED | 44 / 20 |
+
+Self-docking RMSD: top-pose 2.75 A, best-pose 1.28 A → **PASS** (native-like
+pose sampled at rank 2; scoring places it second, motivating 3-engine
+consensus).
 
 ---
 
@@ -292,8 +341,8 @@ scientific decisions were made by the author.
 
 - **Code** (`scripts/`, `setup_env.sh`): MIT License — see `LICENSE`.
 - **Data and results** (docking scores, consensus tables, ADMET profiles,
-  redock reports, publication figures): Creative Commons Attribution 4.0
-  International (CC BY 4.0) — see `DATA_LICENSE`.
+  redock reports, publication figures, 3D poses): Creative Commons
+  Attribution 4.0 International (CC BY 4.0) — see `DATA_LICENSE`.
 
 CC BY means anyone may reuse the results, including commercially, provided
 they give appropriate credit (cite the publication / repository). The MIT

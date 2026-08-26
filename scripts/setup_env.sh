@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install/verify WRN-repurposing environment. Idempotent.
+# Install/verify repurposing environment. Idempotent.
 #   bash setup_env.sh            # install missing
 #   bash setup_env.sh --check    # check only, no installs
 set -uo pipefail
@@ -46,13 +46,15 @@ echo "[setup] Mode: $MODE"
 echo "[setup] Python dependencies..."
 install_py rdkit rdkit rdkit
 install_py numpy numpy numpy
+install_py pandas pandas pandas
 install_py pdbfixer pdbfixer pdbfixer
 install_py openmm openmm openmm
 install_py meeko meeko meeko
 install_py dimorphite_dl dimorphite-dl dimorphite-dl
 install_py matplotlib matplotlib matplotlib
 install_py PIL pillow Pillow
-install_py plip.structure.preparation plip plip
+install_py pymol pymol-open-source pymol-open-source
+install_py plip plip plip
 echo "[setup] Binaries..."
 install_bin obabel openbabel
 install_bin gnina gnina

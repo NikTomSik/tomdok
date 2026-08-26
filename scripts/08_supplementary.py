@@ -10,7 +10,9 @@ Outputs (supplementary/<target>/ by default):
   S6_final_candidates.csv    final CLEAN/FLAGGED prioritisation
   S7_redock_validation.txt   redocking RMSD report
   S8_parameters.json         machine-readable parameters
-  S9_run_all_log.txt         run_all execution log (mirrored from logs/)
+  S9_run_all_log.txt         run_all execution log (most complete run)
+  poses/                     receptor.pdb + per-ligand pose SDFs (any viewer)
+  figures/                   3D/2D figures from stage 09 (included in ZIP)
 
 Usage:
  python scripts/08_supplementary.py --target 7gqu --zip
@@ -21,7 +23,7 @@ from datetime import date
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parents[1]
-REPO = 'https://github.com/TomNikos/tomdok'
+REPO = 'https://github.com/NikTomSik/tomdok'
 
 def n_lines(p):
     with open(p, encoding='utf-8') as f:
@@ -37,7 +39,7 @@ def write_rows(p, rows, cols):
         w = csv.DictWriter(f, fieldnames=cols, extrasaction='ignore')
         w.writeheader()
         for r in rows:
-            w.writerow({c: (r.get(c) or '') for c in cols})
+            w.writerow({c: ('' if r.get(c) is None else r.get(c)) for c in cols})
 
 def first_existing(*paths):
     for p in paths:
@@ -65,7 +67,19 @@ def main():
 
     res = BASE / 'results' / t
     refine = res / 'refine'
+    gdir = refine / 'gnina'
     notes = []
+
+    def pose_of(cid):
+        """Exact match first, then cid_*, then cid* (avoids prefix collisions)."""
+        exact = gdir / f'{cid}.sdf'
+        if exact.exists():
+            return exact
+        und = sorted(gdir.glob(f'{cid}_*.sdf'))
+        if und:
+            return und[0]
+        pre = sorted(gdir.glob(f'{cid}*.sdf'))
+        return pre[0] if pre else None
 
     # ---- S1: library ----
     lib = BASE / 'data' / 'library' / 'library.tsv'
@@ -175,9 +189,10 @@ def main():
     (out / 'S8_parameters.json').write_text(json.dumps(params, indent=2), encoding='utf-8')
     notes.append(('S8_parameters.json', True, 'machine-readable parameters'))
 
-    # ---- S9: run_all execution log ----
-    log_p = first_existing(BASE / 'logs' / f'run_all_{t}.log',
-                           BASE / 'logs' / 'run_all.log')
+    # ---- S9: run_all execution log (largest = most complete run) ----
+    logs = sorted((BASE / 'logs').glob(f'run_all_{t}*.log'),
+                  key=lambda q: q.stat().st_size, reverse=True)
+    log_p = logs[0] if logs else None
     if log_p:
         shutil.copy(log_p, out / 'S9_run_all_log.txt')
         notes.append(('S9_run_all_log.txt', True, str(log_p.relative_to(BASE))))
@@ -190,6 +205,20 @@ def main():
         notes.append(('figures/ (3D+2D)', True, fig_done.read_text(encoding='utf-8').strip()))
     else:
         notes.append(('figures/ (3D+2D)', False, 'run 09_make_figures.py to generate'))
+
+    # ---- poses: universal 3D data (open in ANY viewer) ----
+    poses_out = out / 'poses'
+    poses_out.mkdir(parents=True, exist_ok=True)
+    rec_pdb = BASE / 'data' / t / 'protein_clean.pdb'
+    if rec_pdb.exists():
+        shutil.copy(rec_pdb, poses_out / 'receptor.pdb')
+    n_poses = 0
+    if fin_p.exists():
+        for r in read_rows(fin_p):
+            src = pose_of(r['chembl_id'])
+            if src:
+                shutil.copy(src, poses_out / f"{r['chembl_id']}.sdf"); n_poses += 1
+    notes.append(('poses/ (PDB+SDF)', n_poses > 0, f'{n_poses} poses + receptor.pdb'))
 
     # ---- consistency warnings ----
     pdbqt_n = len(list((BASE / 'pdbqt').glob('*.pdbqt')))

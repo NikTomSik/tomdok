@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Publication figures for ALL final candidates (universal, headless).
 
 For every compound that reached the final list (07_final_candidates.csv)
@@ -5,7 +6,9 @@ generates, under supplementary/<target>/figures/ (the same folder where
 08_supplementary.py puts journal-ready files):
 
   overlay/Fig_overlay_CLEAN.png      all CLEAN candidates overlaid in the site
+  overlay/Fig_overlay_CLEAN.pse      editable PyMOL session of the overlay
   overlay/Fig_overlay_FLAGGED.png    all FLAGGED candidates overlaid
+  overlay/Fig_overlay_FLAGGED.pse    editable PyMOL session of the overlay
   redock/Fig_redock.png              crystal ligand vs top redock pose
   per_ligand/CLEAN/<name>.png        3D: binding-site sticks + polar contacts
   per_ligand/FLAGGED/<name>.png      3D: same for flagged (liability) compounds
@@ -77,7 +80,16 @@ def main():
     CLS_COL = {'CLEAN': 'green', 'FLAGGED': 'orange'}
 
     def pose_of(cid):
-        return next(iter(sorted(GDIR.glob(f'{cid}*.sdf'))), None)
+        """Exact match first, then cid_*, then cid* (avoids prefix collisions
+        like CHEMBL53 vs CHEMBL5314423 or CHEMBL1623 vs CHEMBL1623992)."""
+        exact = GDIR / f'{cid}.sdf'
+        if exact.exists():
+            return exact
+        und = sorted(GDIR.glob(f'{cid}_*.sdf'))
+        if und:
+            return und[0]
+        pre = sorted(GDIR.glob(f'{cid}*.sdf'))
+        return pre[0] if pre else None
 
     def load_protein():
         cmd.load(str(REC), 'rec')
@@ -132,6 +144,7 @@ def main():
         if loaded:
             cmd.zoom(' or '.join(loaded), 6)
             save(fig / 'overlay' / f'Fig_overlay_{tag}.png', 1600, 1200)
+            cmd.save(str(fig / 'overlay' / f'Fig_overlay_{tag}.pse'))
             print(f'[ok] overlay {tag}: {len(loaded)} ligands')
 
     # ---------------- redock overlay ----------------
