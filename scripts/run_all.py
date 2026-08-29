@@ -5,6 +5,11 @@ same orchestrator works for any target. Heavy stages are auto-skipped when
 their outputs look complete (unless --force). Stops on first error;
 --keep-going continues onward.
 
+Robustness features (added):
+- PREFLIGHT check: before stage 03, verifies receptor + readable reference
+  ligand exist. Saves ~4 GPU-hours if target preparation is broken.
+- redock_done(): safe check of redock_report.txt (tolerates missing/corrupt files).
+
 Stage order: 00..07, then 09 (figures), then 08 (supplementary bundle + ZIP);
 08 runs LAST so the ZIP it produces already contains the figures.
 
@@ -27,9 +32,11 @@ Usage:
 import argparse, os, subprocess, sys, time
 from datetime import datetime
 from pathlib import Path
+from rdkit import Chem
 
 BASE = Path(__file__).resolve().parents[1]
 COMPLETION = 0.97   # resume markers tolerate up to ~3% permanent failures
+
 
 class Logger:
     """Mirrors every byte to the terminal AND to the log file (live).
@@ -66,14 +73,98 @@ class Logger:
     def close(self):
         self.f.close()
 
+
 def n_rows(p):
     try:
         with open(p) as f: return sum(1 for _ in f) - 1
     except Exception:
         return 0
 
+
 def n_pdbqt(): return len(list((BASE / 'pdbqt').glob('*.pdbqt')))
 def n_lib(): return n_rows(BASE / 'data' / 'library' / 'library.tsv')
+
+
+def preflight(target, log):
+    """Check critical inputs BEFORE expensive GPU stages (03 screen_gnina).
+    
+    This is the key robustness fix: if 00_prepare_target produced a broken
+    target (e.g. no ref_ligand.sdf, or unreadable SDF), the pipeline fails
+    here — not after 4 hours of GPU compute on stage 03.
+    
+    Called only when stage 00 will be SKIPPED (receptor already exists).
+    If stage 00 will RUN, it creates the files itself, so preflight would
+    incorrectly fail.
+    """
+    d = BASE / 'data' / target
+    problems = []
+    
+    # 1. Receptor files (produced by 00_prepare_target)
+    for f in ('receptor.pdbqt', 'receptor_vina.pdbqt', 'receptor.json'):
+        if not (d / f).exists():
+            problems.append(f"missing {f}")
+    
+    # 2. Reference ligand: must be READABLE by RDKit
+    #    (6vei bug: file existed but was empty; 7kcc bug: file existed but
+    #    had non-aromatic rings that crashed RMSD in stage 05)
+    ref_ok = False
+    last_err = None
+    for f in ('ref_ligand.sdf', 'ref_ligand_prot.sdf'):
+        p = d / f
+        if not p.exists():
+            last_err = f"{f} not found"
+            continue
+        try:
+            found_any = False
+            for m in Chem.SDMolSupplier(str(p), removeHs=True):
+                if m is not None:
+                    found_any = True
+                    break
+            if found_any:
+                ref_ok = True
+                break
+            last_err = f"{f} exists but contains no valid molecules"
+        except Exception as e:
+            last_err = f"{f} unreadable: {e}"
+            continue
+    
+    if not ref_ok:
+        problems.append(f"no readable reference ligand (last error: {last_err})")
+    
+    if problems:
+        msg = (
+            f"\n{'='*60}\n"
+            f"❌ PREFLIGHT FAILED [{target}]\n"
+            f"{'='*60}\n"
+            + "\n".join(f"   • {p}" for p in problems) +
+            f"\n\n"
+            f"   Pipeline остановлен ДО траты GPU-часов на стадии 03.\n"
+            f"   Почини подготовку:\n"
+            f"     python scripts/00_prepare_target.py --pdb-id {target}\n"
+            f"   или вручную:\n"
+            f"     cd data/{target} && cp ref_ligand_prot.sdf ref_ligand.sdf\n"
+            f"   Затем запусти run_all.py снова.\n"
+        )
+        log.say(msg)
+        raise SystemExit(1)
+    
+    log.say(f"✅ Preflight OK for {target}: receptor + reference ligand ready")
+
+
+def redock_done(t):
+    """Safe check for stage 05 completion.
+    
+    Returns True only if redock_report.txt exists AND contains verdict=PASS.
+    Tolerates missing/corrupt files (returns False, triggering a rerun).
+    """
+    rpt = BASE / 'validation' / 'redock' / t / 'redock_report.txt'
+    if not rpt.exists():
+        return False
+    try:
+        return 'verdict=PASS' in rpt.read_text()
+    except Exception:
+        return False
+
 
 def stages(t, a):
     res = BASE / 'results' / t
@@ -107,8 +198,7 @@ def stages(t, a):
          (refine / 'consensus.csv').exists()),
         ('05 redock_validation',
          [sys.executable, 'scripts/05_redock_validation.py', '--target', t],
-         ((BASE / 'validation' / 'redock' / t / 'redock_report.txt').exists() and
-          'verdict=PASS' in (BASE / 'validation' / 'redock' / t / 'redock_report.txt').read_text())),
+         redock_done(t)),
         ('06 admet',
          [sys.executable, 'scripts/06_admet.py', '--all',
           '--input', str(refine / 'consensus.csv')],
@@ -125,6 +215,7 @@ def stages(t, a):
          (supp / 'S0_manifest.txt').exists()
          and (supp / 'figures' / 'FIGURES_DONE.txt').exists()),
     ]
+
 
 def main():
     ap = argparse.ArgumentParser(description='Unattended 00->09 pipeline')
@@ -150,6 +241,15 @@ def main():
     log.say(f'=== run_all started {datetime.now().isoformat(timespec="seconds")} ===')
     log.say(f'Parameters: target={t}, min_phase={a.min_phase}, force={a.force}, start={a.start}')
 
+    # ---- PREFLIGHT: check target integrity BEFORE spending GPU-hours ----
+    # Only runs when stage 00 will be SKIPPED (receptor already exists).
+    # If stage 00 will RUN (first launch / --force), skip preflight because
+    # stage 00 itself will create the files.
+    receptor_exists = (BASE / 'data' / t / 'receptor.pdbqt').exists()
+    if receptor_exists and not a.force:
+        preflight(t, log)
+    # --------------------------------------------------------------------
+
     try:
         for name, cmd, done in stages(t, a):
             num = int(name[:2])
@@ -172,6 +272,7 @@ def main():
             log.say(f'  {name:<20} {st:<6} {dt:7.0f} s')
         log.say(f'=== run_all finished {datetime.now().isoformat(timespec="seconds")} ===')
         log.close()
+
 
 if __name__ == '__main__':
     main()

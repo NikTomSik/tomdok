@@ -1,13 +1,13 @@
-"""Unified target preparation for virtual screening (final, universal version).
+"""Unified target preparation for virtual screening (robust version).
 
 Fully automatic cycle for a NEW target (single command):
   python scripts/00_prepare_target.py --pdb-id 4cgz
   -> downloads 4CGZ.pdb from RCSB
   -> extracts crystallographic ligand (largest hetero-residue) to ref_ligand.sdf
-  -> prepares protein, receptors and docking box under data/<pdb-id>/
+  -> prepares protein, receptors and docking box under data/<pdb-id>/ 
 
 Steps:
- 0. Download PDB from RCSB (if file is missing) + auto-extraction of ref_ligand.sdf
+ 0. Download PDB from RCSB (if missing) + ensure ref_ligand.sdf exists in output dir
  1. Protein: PDBFixer - waters/cofactors, missing atoms, H at pH 7.4 -> protein_clean.pdb
  2. Receptor: PDBQT with Gasteiger charges (OpenBabel)               -> receptor.pdbqt
  2b. Vina receptor: without ROOT/BRANCH/TORSDOF tags                 -> receptor_vina.pdbqt
@@ -15,11 +15,6 @@ Steps:
                                                                -> ref_ligand_prot.sdf, ref_ligand.pdbqt
  4. Box: center = geometric center of crystal ligand,
     size = clip(ptp + 5 A, min_size, 27 A)                     -> receptor.json
-
-Usage:
- python scripts/00_prepare_target.py --pdb-id 7gqu
- python scripts/00_prepare_target.py --pdb-id 4cgz --out data/4cgz
- python scripts/00_prepare_target.py --pdb my.pdb --ref my_ligand.sdf --out data/my
 """
 import argparse, json, shutil, subprocess, sys
 from pathlib import Path
@@ -66,12 +61,24 @@ def extract_ref_ligand(pdb_path, out_sdf):
     tmp.unlink(missing_ok=True)
     if mol is None or mol.GetNumAtoms() < 3:
         return None
+        
+    # FIX: Attempt to sanitize and perceive aromaticity for PDB extracts
+    try:
+        Chem.SanitizeMol(mol)
+    except Exception:
+        mol.UpdatePropertyCache(strict=False)
+        try:
+            Chem.SanitizeMol(mol)
+        except Exception:
+            pass
+    Chem.SetAromaticity(mol)
+    
     w = Chem.SDWriter(str(out_sdf)); w.write(mol); w.close()
     return mol.GetNumAtoms()
 
 
 def prep_protein(pdb_in, pdb_out):
-    """Step 1: PDBFixer (from prep_protein.py)."""
+    """Step 1: PDBFixer."""
     import pdbfixer
     from openmm.app import PDBFile
     print('[1/4] Protein preparation (PDBFixer, pH 7.4)...')
@@ -108,7 +115,7 @@ def make_vina_receptor(pdbqt_with_tags, pdbqt_clean):
 
 
 def prep_ref_ligand(sdf_in, sdf_out, pdbqt_out):
-    """Step 3: protonation + 3D + Meeko (from prep_ligand.py)."""
+    """Step 3: protonation + 3D + Meeko."""
     print('[3/4] Reference ligand (pH 7.4 + 3D + Meeko)...')
     mol = next((m for m in Chem.SDMolSupplier(str(sdf_in), removeHs=True) if m), None)
     if mol is None:
@@ -152,7 +159,7 @@ def prep_ref_ligand(sdf_in, sdf_out, pdbqt_out):
 
 
 def calc_box(sdf_in, json_out, min_size=25.0):
-    """Step 4: docking box from crystallographic coordinates (from calc_box.py + tightness fix)."""
+    """Step 4: docking box from crystallographic coordinates."""
     print('[4/4] Docking box from crystallographic coordinates...')
     mol = next((m for m in Chem.SDMolSupplier(str(sdf_in), removeHs=False) if m), None)
     if mol is None:
@@ -180,27 +187,40 @@ def main():
                     help='minimum box size, A (guard against tight box)')
     a = ap.parse_args()
 
-    # target-aware default output folder (no hardcoded PDB id)
     out = Path(a.out) if a.out else Path(__file__).resolve().parents[1] / 'data' / a.pdb_id.lower()
     out.mkdir(parents=True, exist_ok=True)
     pdb = Path(a.pdb) if a.pdb else out / f'{a.pdb_id.lower()}.pdb'
-    ref = Path(a.ref) if a.ref else out / 'ref_ligand.sdf'
+    
+    # raw_ref - это файл, который_stage 05_ будет искать для redock
+    raw_ref = out / 'ref_ligand.sdf'
+    user_ref = Path(a.ref) if a.ref else None
 
     if not pdb.exists():
         download_pdb(a.pdb_id, pdb)
-    if not ref.exists():
+        
+    if user_ref:
+        if not user_ref.exists():
+            sys.exit(f'ERROR: provided --ref file not found: {user_ref}')
+        if user_ref.resolve() != raw_ref.resolve():
+            shutil.copy(user_ref, raw_ref)
+            print(f'[0/4] Copied reference ligand to {raw_ref.name}')
+        else:
+            print(f'[0/4] Using provided reference ligand: {raw_ref.name}')
+    elif not raw_ref.exists():
         print(f'[0/4] No reference ligand - extracting from {pdb.name}...')
-        n = extract_ref_ligand(pdb, ref)
+        n = extract_ref_ligand(pdb, raw_ref)
         if n is None:
             sys.exit(f'ERROR: failed to extract ligand from {pdb} '
                      f'(manually: obabel {pdb} -O ref.sdf -m)')
-        print(f'      saved: {ref.name} ({n} atoms)')
+        print(f'      saved: {raw_ref.name} ({n} atoms)')
+    else:
+        print(f'[0/4] Using existing reference ligand: {raw_ref.name}')
 
     prep_protein(pdb, out / 'protein_clean.pdb')
     make_receptor_pdbqt(out / 'protein_clean.pdb', out / 'receptor.pdbqt')
     make_vina_receptor(out / 'receptor.pdbqt', out / 'receptor_vina.pdbqt')
-    prep_ref_ligand(ref, out / 'ref_ligand_prot.sdf', out / 'ref_ligand.pdbqt')
-    calc_box(ref, out / 'receptor.json', a.min_size)
+    prep_ref_ligand(raw_ref, out / 'ref_ligand_prot.sdf', out / 'ref_ligand.pdbqt')
+    calc_box(raw_ref, out / 'receptor.json', a.min_size)
 
     # ---- self-check ----
     rec = (out / 'receptor.pdbqt').read_text().splitlines()
