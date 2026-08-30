@@ -23,3 +23,4 @@ validation/
 supplementary/
 *Zone.Identifier
 *.out
+*.pyc

@@ -1,11 +1,11 @@
-"""Two-stage top-hit re-evaluation + 3-engine consensus (final version).
+"""Two-stage top-hit re-evaluation + 3-engine consensus (stage 05 of 00-09).
 
 Stage 0: primary-screen filter (aff <= aff_cut AND cnn >= cnn_cut).
-        IDs without PDBQT (salts from older libraries) are silently skipped.
+         IDs without PDBQT (salts from older libraries) are silently skipped.
 Stage 1: GNINA exh=32 on filtered (resume: gnina_refined_top.csv);
-        re-filter on refined values.
+         re-filter on refined values.
 Stage 2: Vina consensus (exh=32) + LeDock,
-        resume per engine CSV; Vina cache is pulled from consensus.csv.
+         resume per engine CSV; Vina cache is pulled from consensus.csv.
 
 Engines and their receptors:
   GNINA  -> receptor.pdbqt (Gasteiger charges)
@@ -13,9 +13,15 @@ Engines and their receptors:
   LeDock -> pro.pdb (lepro output); config: Receptor / Binding pocket /
             Number of binding poses / Ligands list; scores from .dok
 
+New (v2): if 01_redock_validation.py has written a per-target LeDock baseline
+(line 'ledock_native=<x>' in validation/redock/<t>/redock_report.txt), the
+consensus table gains a 'dledock' column = ledock_score - ledock_native, which
+makes the systematically-soft LeDock scale interpretable per target
+(negative dledock = candidate scores better than the native ligand).
+
 Usage:
- python scripts/04_refine_consensus.py 7gqu
- python scripts/04_refine_consensus.py 7gqu --primary /path/all_docking_results.csv
+  python scripts/05_refine_consensus.py 7gqu
+  python scripts/05_refine_consensus.py 7gqu --primary /path/all_docking_results.csv
 """
 import argparse, csv, json, os, re, shutil, subprocess, time
 import multiprocessing as mp
@@ -68,6 +74,23 @@ def load_names(paths):
                 nm = (row.get('pref_name') or '').strip()
                 if cid and nm: names.setdefault(cid, nm)
     return names
+
+
+def read_ledock_native():
+    """Per-target LeDock baseline written by 01_redock_validation.py
+    ('ledock_native=<value>' in redock_report.txt, or ledock_baseline.json)."""
+    vdir = BASE / 'validation' / 'redock' / G['TARGET']
+    rpt = vdir / 'redock_report.txt'
+    if rpt.exists():
+        for line in rpt.read_text(errors='ignore').splitlines():
+            if line.startswith('ledock_native'):
+                try: return float(line.split('=')[-1].strip())
+                except ValueError: return None
+    js = vdir / 'ledock_baseline.json'
+    if js.exists():
+        try: return float(json.loads(js.read_text()).get('ledock_native'))
+        except Exception: return None
+    return None
 
 
 # ---------------- Stage 1: GNINA exh=32 (GPU) ----------------
@@ -192,9 +215,9 @@ def run_ledock(cid):
     cfg.write_text(
         f"Receptor\n{rec}\n\n"
         f"Binding pocket\n"
-        f"{b['center_x']-hx:.3f} {b['center_x']+hx:.3f}\n"
-        f"{b['center_y']-hy:.3f} {b['center_y']+hy:.3f}\n"
-        f"{b['center_z']-hz:.3f} {b['center_z']+hz:.3f}\n\n"
+        f"{b['center_x'] - hx:.3f} {b['center_x'] + hx:.3f}\n"
+        f"{b['center_y'] - hy:.3f} {b['center_y'] + hy:.3f}\n"
+        f"{b['center_z'] - hz:.3f} {b['center_z'] + hz:.3f}\n\n"
         f"Other\nNumber of binding poses\n10\n\n"
         f"Ligands list\n{lst}\n")
     subprocess.run(['ledock', str(cfg)], capture_output=True, text=True, timeout=1800)
@@ -244,8 +267,9 @@ def main():
     ap.add_argument('--gpus', default='0,1')
     ap.add_argument('--workers', type=int, default=8)
     a = ap.parse_args()
-
     t = a.target.lower()
+
+    G['TARGET'] = t
     G['EXH'] = a.exh
     G['GPUS'] = [int(x) for x in a.gpus.split(',') if x.strip()]
     G['LIG_DIR'] = BASE / 'pdbqt'
@@ -291,7 +315,8 @@ def main():
         for i, (c, v) in enumerate(sel, 1):
             w.writerow([i, c, f'{v[0]:.2f}', f'{v[1]:.4f}' if v[1] is not None else ''])
     final = [(c, v) for c, v in sel if v[0] <= a.aff_cut and v[1] is not None and v[1] >= a.cnn_cut]
-    print(f'[Post-refinement filter] aff <= {a.aff_cut} and CNN >= {a.cnn_cut}: {len(final)} of {len(sel)}')
+    print(f'[Post-refinement filter] aff <= {a.aff_cut} and CNN >= {a.cnn_cut}: '
+          f'{len(final)} of {len(sel)}')
     if not final:
         print('Nothing to validate.'); return
     ids = [c for c, _ in final]
@@ -300,14 +325,12 @@ def main():
     # ---- Stage 2: consensus with per-engine resume ----
     vina_csv = G['OUT'] / 'vina_scores.csv'
     ledo_csv = G['OUT'] / 'ledock_scores.csv'
-
     # Vina cache from old consensus (avoid recomputing)
     if not vina_csv.exists() and (G['OUT'] / 'consensus.csv').exists():
         with open(G['OUT'] / 'consensus.csv', newline='') as f:
             vd = {r['chembl_id']: float(r['vina_aff']) for r in csv.DictReader(f) if r.get('vina_aff')}
         if vd:
             save_csv(vina_csv, vd); print(f'[resume] Vina cache from consensus.csv: {len(vd)}')
-
     vr = load_csv(vina_csv)
     if shutil.which('vina'):
         todo = [c for c in ids if c not in vr and (G['LIG_DIR'] / f'{c}.pdbqt').exists()]
@@ -340,26 +363,41 @@ def main():
         print('SKIP LeDock: not found (ledock/lepro)')
     for c in ids: results[c]['ledock'] = lr.get(c)
 
-    # ---- Consensus ----
+    # ---- Consensus (+ per-target LeDock baseline from stage 01) ----
+    native_ld = read_ledock_native()
+    if native_ld is None:
+        print('[note] ledock_native not found - run 01_redock_validation.py first; '
+              'dledock column left empty')
     out = G['OUT'] / 'consensus.csv'
     with open(out, 'w', newline='') as f:
         w = csv.writer(f)
-        w.writerow(['chembl_id', 'name', 'gnina32_aff', 'cnn', 'vina_aff', 'ledock_score', 'n_engines_le9'])
+        w.writerow(['chembl_id', 'name', 'gnina32_aff', 'cnn', 'vina_aff',
+                    'ledock_score', 'n_engines_le9', 'dledock'])
         for c in ids:
             r = results[c]
             vals = [r['gnina32'], r.get('vina'), r.get('ledock')]
             n = sum(1 for v in vals if v is not None and v <= -9.0)
+            dld = ''
+            if r.get('ledock') is not None and native_ld is not None:
+                dld = f"{r['ledock'] - native_ld:.2f}"
             w.writerow([c, NAMES.get(c, ''), f"{r['gnina32']:.2f}", f"{r['cnn']:.4f}",
                         f"{r['vina']:.2f}" if r.get('vina') is not None else '',
-                        f"{r['ledock']:.2f}" if r.get('ledock') is not None else '', n])
+                        f"{r['ledock']:.2f}" if r.get('ledock') is not None else '', n, dld])
     print(f'\n[Done] Consensus: {out} | total time: {fmt_eta(time.time() - t_start)}')
-    print(f'{"CHEMBL":<14}{"name":<20}{"GNINA32":>8}{"CNN":>7}{"VINA":>7}{"LeDock":>8}{"N<=-9":>6}')
+    hdr = (f'{"CHEMBL":<14}{"name":<20}{"GNINA32":>8}{"CNN":>7}{"VINA":>7}'
+           f'{"LeDock":>8}{"N<=-9":>6}')
+    if native_ld is not None:
+        hdr += f'{"dLeDock":>8}'
+    print(hdr)
     for c in ids:
         r = results[c]
         vals = [r['gnina32'], r.get('vina'), r.get('ledock')]
         n = sum(1 for v in vals if v is not None and v <= -9.0)
-        print(f"{c:<14}{NAMES.get(c, '-')[:19]:<20}{r['gnina32']:8.2f}{r['cnn']:7.3f}"
-              f"{r.get('vina') or 0:7.2f}{r.get('ledock') or 0:8.2f}{n:6d}")
+        line = (f"{c:<14}{NAMES.get(c, '-')[:19]:<20}{r['gnina32']:8.2f}{r['cnn']:7.3f}"
+                f"{r.get('vina') or 0:7.2f}{r.get('ledock') or 0:8.2f}{n:6d}")
+        if native_ld is not None and r.get('ledock') is not None:
+            line += f"{r['ledock'] - native_ld:8.2f}"
+        print(line)
 
 
 if __name__ == '__main__':
