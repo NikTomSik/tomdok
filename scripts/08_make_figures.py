@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
-"""Publication figures for ALL final candidates (universal, headless).
+"""Publication figures for the FINAL shortlist (universal, headless).
 
 Stage 08 of the renumbered pipeline (00 prep, 01 redock gate, 02 library,
 03 ligands, 04 screen, 05 consensus, 06 ADMET, 07 candidates, 08 figures,
 09 supplementary). Runs BEFORE 09_supplementary so the bundle ZIP already
 contains the figures.
 
-For every compound that reached the final list (07_final_candidates.csv)
-generates, under supplementary/<target>/figures/ (the same folder where
-09_supplementary.py puts journal-ready files):
+Selection rule (v3): figures are generated ONLY for
+  * TOP-15 CLEAN by affinity (GNINA32) with CNN > 0.7, and
+  * ALL FLAGGED compounds.
+This keeps the supplementary compact and focused on the actionable shortlist.
 
-  overlay/Fig_overlay_CLEAN.png      all CLEAN candidates overlaid in the site
+For every selected compound generates, under supplementary/<target>/figures/:
+
+  overlay/Fig_overlay_CLEAN.png      top-15 CLEAN overlaid in the site
   overlay/Fig_overlay_CLEAN.pse      editable PyMOL session of the overlay
-  overlay/Fig_overlay_FLAGGED.png    all FLAGGED candidates overlaid
+  overlay/Fig_overlay_FLAGGED.png    all FLAGGED overlaid
   overlay/Fig_overlay_FLAGGED.pse    editable PyMOL session of the overlay
   redock/Fig_redock.png              crystal ligand vs top redock pose,
                                      captioned with RMSD from the 01 report
@@ -25,13 +28,11 @@ Writes FIGURES_DONE.txt at the end - the resume sentinel used by run_all.py
 (stages 08 and 09 are considered done only when it exists).
 
 Usage:
-  python scripts/08_make_figures.py --target 7gqu
-  python scripts/08_make_figures.py --target 9fza            # any target
-  python scripts/08_make_figures.py --target 7gqu --skip-2d  # 3D only (no PLIP)
+  python scripts/08_make_figures.py --target 9fza
+  python scripts/08_make_figures.py --target 7gqu --skip-2d   # 3D only (no PLIP)
+  python scripts/08_make_figures.py --target 9fza --top-clean 15 --cnn-cut 0.7
 """
-import argparse
-import csv
-import sys
+import argparse, csv, sys
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parents[1]
@@ -89,11 +90,15 @@ def add_caption(png, lines, font):
 
 
 def main():
-    ap = argparse.ArgumentParser(description='Figures for all final candidates')
+    ap = argparse.ArgumentParser(description='Figures for the final shortlist')
     ap.add_argument('--target', default='7gqu')
     ap.add_argument('--out', default=None,
                     help='figures folder (default: supplementary/<target>/figures)')
     ap.add_argument('--skip-2d', action='store_true', help='skip 2D/PLIP diagrams')
+    ap.add_argument('--top-clean', type=int, default=15,
+                    help='how many CLEAN (by affinity) to keep (default 15)')
+    ap.add_argument('--cnn-cut', type=float, default=0.7,
+                    help='CNN threshold for CLEAN selection (default > 0.7)')
     ap.add_argument('--dpi', type=int, default=300)
     a = ap.parse_args()
     t = a.target.lower()
@@ -107,6 +112,28 @@ def main():
     if not fin.exists():
         sys.exit(f'ERROR: {fin} not found - run stages 04/06/07 first')
     rows = read_rows(fin)
+
+    # CNN values live in consensus.csv (final_candidates may lack the column)
+    cons = {r['chembl_id']: r for r in
+            read_rows(BASE / 'results' / t / 'refine' / 'consensus.csv')}
+
+    def cnn_of(r):
+        for src in (r, cons.get(r['chembl_id'], {})):
+            v = (src or {}).get('cnn')
+            if v not in (None, ''):
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    continue
+        return 1.0   # consensus stage already enforced cnn >= 0.7
+
+    clean = [r for r in rows if r['cls'] == 'CLEAN' and cnn_of(r) > a.cnn_cut]
+    clean.sort(key=lambda r: float(r['gnina32']))
+    clean = clean[:a.top_clean]
+    flagged = [r for r in rows if r['cls'] == 'FLAGGED']
+    sel = clean + flagged
+    print(f'[select] CLEAN top-{a.top_clean} (cnn>{a.cnn_cut}) = {len(clean)}; '
+          f'FLAGGED all = {len(flagged)}; total figures set = {len(sel)}')
 
     lib = {}
     lp = BASE / 'data' / 'library' / 'library.tsv'
@@ -164,9 +191,9 @@ def main():
     def save(png, w=1200, h=900):
         cmd.png(str(png), width=w, height=h, dpi=a.dpi, ray=1)
 
-    # ---------------- 3D per ligand ----------------
+    # ---------------- 3D per ligand (selected only) ----------------
     n3d = 0
-    for r in rows:
+    for r in sel:
         cid, name, cls = r['chembl_id'], r['name'], r['cls']
         pose = pose_of(cid)
         if pose is None:
@@ -191,18 +218,16 @@ def main():
             cmd.zoom('lig', 6)
             save(fig / 'per_ligand' / cls / f'{safe(name)}.png')
             n3d += 1
-            if n3d % 10 == 0:
-                print(f'   3D done: {n3d}/{len(rows)}')
+            print(f'   3D done: {n3d}/{len(sel)}')
         except Exception as e:
             print(f'[warn] 3D failed for {cid}: {type(e).__name__}')
 
-    # ---------------- overlays ----------------
-    for tag in ['CLEAN', 'FLAGGED']:
-        sub = [r for r in rows if r['cls'] == tag]
+    # ---------------- overlays (CLEAN top-15 / FLAGGED all) ----------------
+    for tag, sub_rows in [('CLEAN', clean), ('FLAGGED', flagged)]:
         cmd.delete('all')
         load_protein()
         loaded = []
-        for i, r in enumerate(sub):
+        for i, r in enumerate(sub_rows):
             pose = pose_of(r['chembl_id'])
             if pose is None:
                 continue
@@ -259,7 +284,7 @@ def main():
     else:
         print('[warn] redock files missing; Fig_redock skipped')
 
-    # ---------------- 2D + PLIP ----------------
+    # ---------------- 2D + PLIP (selected only) ----------------
     n2d = 0
     tmp = fig.parent / '_tmp_complex.pdb'
     if not a.skip_2d:
@@ -275,7 +300,7 @@ def main():
 
         prot_lines = [l for l in REC.read_text().splitlines()
                       if l.startswith(('ATOM', 'TER'))]
-        for r in rows:
+        for r in sel:
             cid, name, cls = r['chembl_id'], r['name'], r['cls']
             try:
                 pose = pose_of(cid)
@@ -321,25 +346,27 @@ def main():
                 d.text((12, 570), f'{name}  ({cid})  [{cls}]', fill='black', font=font)
                 line2 = (f"GNINA {r['gnina32']} | Vina {r['vina']} | "
                          f"LeDock {r['ledock']} kcal/mol; QED {r['qed']}")
-                if r.get('dLedock'):
-                    line2 += f"; dLeDock {r['dLedock']}"
+                if r.get('dledock') or r.get('dLedock'):
+                    line2 += f"; dLeDock {r.get('dledock') or r.get('dLedock')}"
                 d.text((12, 600), line2, fill='black', font=font)
                 d.text((12, 630), inter, fill='black', font=font)
                 if r.get('flags'):
                     d.text((12, 660), f'FLAGS: {r["flags"]}', fill='red', font=font)
                 canvas.save(str(fig / 'interactions_2d' / cls / f'{safe(name)}.png'))
                 n2d += 1
-                if n2d % 10 == 0:
-                    print(f'   2D done: {n2d}/{len(rows)}')
+                print(f'   2D done: {n2d}/{len(sel)}')
             except Exception as e:
                 print(f'[warn] 2D failed for {cid}: {type(e).__name__}')
         tmp.unlink(missing_ok=True)
 
     # ---------------- resume sentinel for run_all ----------------
     (fig / 'FIGURES_DONE.txt').write_text(
-        f'3D={n3d}; 2D={n2d}; overlays=CLEAN,FLAGGED; '
+        f'selection=CLEAN top-{a.top_clean} (cnn>{a.cnn_cut}) + FLAGGED all; '
+        f'3D={n3d}; 2D={n2d}; '
+        f'overlays=CLEAN({len(clean)}),FLAGGED({len(flagged)}); '
         f'redock={"ok" if redock_ok else "skipped"}\n')
     print(f'\n✅ Figures: {fig}')
+    print(f'   selection: {len(clean)} CLEAN + {len(flagged)} FLAGGED')
     print(f'   3D per-ligand: {n3d}; overlays: CLEAN+FLAGGED; '
           f'redock: {"ok" if redock_ok else "skipped"}; 2D: {n2d}')
 
