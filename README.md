@@ -1,7 +1,5 @@
 # Universal Drug Repurposing Pipeline
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22099251.svg)](https://doi.org/10.5281/zenodo.22099251)
-
 A reproducible virtual screening pipeline for any protein target. Runs three
 independent docking engines (GNINA, AutoDock Vina, LeDock), applies rule-based
 and data-driven ADMET profiling, produces publication figures for all final
